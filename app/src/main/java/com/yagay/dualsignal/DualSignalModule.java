@@ -4,10 +4,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
-import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.LinearLayout;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -24,13 +22,14 @@ import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 /**
- * Runtime dual-SIM stacker for OPlus SystemUI.
+ * Crash-safe runtime dual-SIM stacker for OPlus SystemUI.
  *
- * Design rules:
- * 1. Never replace signal drawables/resources. SystemUI remains the single source of truth.
- * 2. Re-parent the two existing mobile views instead of cloning them, preserving controllers/listeners.
- * 3. Apply only after both views share a stable parent.
- * 4. Fail closed: if the hierarchy is unfamiliar, leave SystemUI untouched.
+ * Important safety rule: never re-parent, remove, add, clone, or replace a SystemUI
+ * mobile signal View. OPlus SystemUI controllers may retain references to the original
+ * parent/index/layout params. Re-parenting those Views can cause a SystemUI crash loop
+ * and trigger LSPosed safe mode.
+ *
+ * This implementation only applies visual transforms to the two existing mobile Views.
  */
 public final class DualSignalModule extends XposedModule {
     private static final String TAG = "DualSignal102";
@@ -41,6 +40,8 @@ public final class DualSignalModule extends XposedModule {
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Set<ViewGroup> PENDING =
             Collections.newSetFromMap(Collections.synchronizedMap(new WeakHashMap<>()));
+
+    private static final float SIGNAL_SCALE = 0.66f;
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
@@ -66,7 +67,7 @@ public final class DualSignalModule extends XposedModule {
             Method attached = View.class.getDeclaredMethod("onAttachedToWindow");
             attached.setAccessible(true);
             hook(attached).intercept(AttachHook.INSTANCE);
-            log(Log.INFO, TAG, "View attach hook installed");
+            log(Log.INFO, TAG, "safe attach hook installed");
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "install failed: " + t);
         }
@@ -84,7 +85,7 @@ public final class DualSignalModule extends XposedModule {
                     scheduleParent(view);
                 }
             } catch (Throwable t) {
-                Log.w(TAG, "attach callback ignored", t);
+                Log.w(TAG, "attach callback ignored: " + t);
             }
             return result;
         }
@@ -94,20 +95,24 @@ public final class DualSignalModule extends XposedModule {
         if (!(view.getParent() instanceof ViewGroup parent)) return;
         if (DONE.containsKey(parent) || !PENDING.add(parent)) return;
 
-        Handler h = view.getHandler();
-        Runnable r = () -> {
+        Handler handler = view.getHandler();
+        Runnable action = () -> {
             PENDING.remove(parent);
-            tryStack(parent);
+            try {
+                tryStack(parent);
+            } catch (Throwable t) {
+                Log.w(TAG, "stack attempt ignored: " + t);
+            }
         };
-        if (h != null) h.post(r);
-        else new Handler(Looper.getMainLooper()).post(r);
+
+        if (handler != null) handler.post(action);
+        else new Handler(Looper.getMainLooper()).post(action);
     }
 
     private static void tryStack(ViewGroup parent) {
         if (DONE.containsKey(parent)) return;
-        List<View> mobiles = collectDirectMobileChildren(parent);
 
-        // Some OPlus builds put each mobile view in one thin wrapper. Handle that level too.
+        List<View> mobiles = collectDirectMobileChildren(parent);
         if (mobiles.size() != 2) {
             mobiles = collectWrappedMobileChildren(parent);
         }
@@ -115,66 +120,62 @@ public final class DualSignalModule extends XposedModule {
 
         View first = mobiles.get(0);
         View second = mobiles.get(1);
-        if (first == second || first.getParent() != second.getParent()) return;
+        if (first == second) return;
+        if (first.getParent() != second.getParent()) return;
         if (!(first.getParent() instanceof ViewGroup actualParent)) return;
-        if (actualParent instanceof DualSignalContainer) return;
 
         int i1 = actualParent.indexOfChild(first);
         int i2 = actualParent.indexOfChild(second);
-        if (i1 < 0 || i2 < 0) return;
+        if (i1 < 0 || i2 < 0 || Math.abs(i1 - i2) > 3) return;
 
-        // Require proximity. This prevents accidentally grabbing a QS/mobile view elsewhere.
-        if (Math.abs(i1 - i2) > 3) return;
-
-        ViewGroup.LayoutParams lp1 = first.getLayoutParams();
-        ViewGroup.LayoutParams lp2 = second.getLayoutParams();
-        int insertAt = Math.min(i1, i2);
-
-        DualSignalContainer stack = new DualSignalContainer(actualParent.getContext());
-        stack.setOrientation(LinearLayout.VERTICAL);
-        stack.setGravity(Gravity.CENTER);
-        stack.setClipChildren(false);
-        stack.setClipToPadding(false);
-        stack.setBaselineAligned(false);
-        stack.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-
-        // Preserve the outer footprint as much as possible. The children are scaled slightly
-        // so two rows fit inside a normal status-bar height without forcing parent re-layout.
-        int h = ViewGroup.LayoutParams.MATCH_PARENT;
-        // Do not force a fixed width: large 5G/4G badges on OPlus builds otherwise get clipped.
-        ViewGroup.LayoutParams outer = new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, h);
-
-        actualParent.removeView(first);
-        actualParent.removeView(second);
-
-        prepareChild(first);
-        prepareChild(second);
-        stack.addView(first, childLayout(lp1));
-        stack.addView(second, childLayout(lp2));
-        actualParent.addView(stack, Math.min(insertAt, actualParent.getChildCount()), outer);
-
+        // Wait until SystemUI has completed at least one layout pass.
+        actualParent.post(() -> applyVisualStack(actualParent, first, second));
         DONE.put(actualParent, Boolean.TRUE);
-        Log.i(TAG, "stacked two mobile views: " + describe(first) + " + " + describe(second));
     }
 
-    private static void prepareChild(View v) {
-        v.setPivotX(0f);
-        v.setPivotY(0f);
-        v.setScaleX(0.72f);
-        v.setScaleY(0.72f);
-        // Scale does not affect measured size; translations compensate so rows visually tighten.
-        v.setTranslationX(0f);
-        v.setTranslationY(0f);
-    }
+    private static void applyVisualStack(ViewGroup parent, View first, View second) {
+        try {
+            if (!first.isAttachedToWindow() || !second.isAttachedToWindow()) return;
+            if (first.getParent() != parent || second.getParent() != parent) return;
 
-    private static LinearLayout.LayoutParams childLayout(ViewGroup.LayoutParams old) {
-        int width = old != null && old.width > 0 ? old.width : ViewGroup.LayoutParams.WRAP_CONTENT;
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(width, 0, 1f);
-        lp.gravity = Gravity.CENTER;
-        return lp;
-    }
+            int w1 = Math.max(first.getWidth(), first.getMeasuredWidth());
+            int w2 = Math.max(second.getWidth(), second.getMeasuredWidth());
+            int h1 = Math.max(first.getHeight(), first.getMeasuredHeight());
+            int h2 = Math.max(second.getHeight(), second.getMeasuredHeight());
+            if (w1 <= 0 || w2 <= 0 || h1 <= 0 || h2 <= 0) {
+                parent.post(() -> applyVisualStack(parent, first, second));
+                return;
+            }
 
+            // Keep each SystemUI View in its original parent and original slot.
+            first.setPivotX(first.getWidth() / 2f);
+            first.setPivotY(first.getHeight() / 2f);
+            second.setPivotX(second.getWidth() / 2f);
+            second.setPivotY(second.getHeight() / 2f);
+            first.setScaleX(SIGNAL_SCALE);
+            first.setScaleY(SIGNAL_SCALE);
+            second.setScaleX(SIGNAL_SCALE);
+            second.setScaleY(SIGNAL_SCALE);
+
+            // Move the visual centers onto the same X coordinate without touching layout params.
+            float center1 = first.getLeft() + first.getWidth() / 2f;
+            float center2 = second.getLeft() + second.getWidth() / 2f;
+            float targetCenter = Math.min(center1, center2) + Math.min(w1, w2) * 0.30f;
+            first.setTranslationX(targetCenter - center1);
+            second.setTranslationX(targetCenter - center2);
+
+            // Split the normal status-bar height into upper/lower visual rows.
+            float rowOffset = Math.max(2f, Math.min(h1, h2) * 0.23f);
+            first.setTranslationY(-rowOffset);
+            second.setTranslationY(rowOffset);
+
+            // Transforms do not modify touch handling, parent ownership, layout params,
+            // controller references, or SystemUI signal state callbacks.
+            Log.i(TAG, "safe-stacked two mobile views: " + describe(first) + " + " + describe(second));
+        } catch (Throwable t) {
+            Log.w(TAG, "visual stack ignored: " + t);
+        }
+    }
 
     private static List<View> collectDirectMobileChildren(ViewGroup parent) {
         ArrayList<View> out = new ArrayList<>(2);
@@ -192,7 +193,7 @@ public final class DualSignalModule extends XposedModule {
             if (!(child instanceof ViewGroup vg)) continue;
             if (vg.getChildCount() > 8) continue;
             View hit = findOneMobile(vg, 0);
-            if (hit != null) out.add(child); // move the wrapper, preserving its internals
+            if (hit != null) out.add(child);
         }
         return out;
     }
@@ -210,7 +211,6 @@ public final class DualSignalModule extends XposedModule {
     }
 
     private static boolean isMobileCandidate(View view) {
-        if (view instanceof DualSignalContainer) return false;
         String cls = view.getClass().getName().toLowerCase(Locale.ROOT);
         String id = resourceEntryName(view).toLowerCase(Locale.ROOT);
 
@@ -224,7 +224,6 @@ public final class DualSignalModule extends XposedModule {
                 || id.contains("mobile_combo")
                 || id.contains("signal_cluster_mobile");
 
-        // Avoid generic ImageViews whose id merely contains "signal".
         return classHit || idHit;
     }
 
@@ -240,12 +239,5 @@ public final class DualSignalModule extends XposedModule {
 
     private static String describe(View v) {
         return v.getClass().getSimpleName() + "#" + resourceEntryName(v);
-    }
-
-    /** Marker subclass prevents re-processing our own container. */
-    private static final class DualSignalContainer extends LinearLayout {
-        DualSignalContainer(android.content.Context context) {
-            super(context);
-        }
     }
 }
