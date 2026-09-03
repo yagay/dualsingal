@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
@@ -34,16 +35,23 @@ public final class DualSignalModule extends XposedModule {
     private static final String TARGET = "com.android.systemui";
     private static final AtomicBoolean INSTALLED = new AtomicBoolean(false);
 
-    private static final Map<ViewGroup, Boolean> DONE =
-            Collections.synchronizedMap(new WeakHashMap<>());
     private static final Set<ViewGroup> PENDING =
             Collections.newSetFromMap(Collections.synchronizedMap(new WeakHashMap<>()));
     private static final Set<String> LOGGED_CANDIDATES =
             Collections.synchronizedSet(new java.util.HashSet<>());
     private static final Map<ViewGroup, Boolean> LOGGED_SCANS =
             Collections.synchronizedMap(new WeakHashMap<>());
-    private static final Map<ViewGroup, Integer> LAYOUT_RETRIES =
+    private static final Set<View> TRANSFORMED =
+            Collections.newSetFromMap(Collections.synchronizedMap(new WeakHashMap<>()));
+    private static final Set<View> CLAIMED =
+            Collections.newSetFromMap(Collections.synchronizedMap(new WeakHashMap<>()));
+    private static final Set<String> LOGGED_STATUS_ROOTS =
+            Collections.synchronizedSet(new java.util.HashSet<>());
+    private static final Map<View, BaseTransform> BASE_TRANSFORMS =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<View, PairState> PAIR_STATES =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    private static final AtomicInteger DIAGNOSTIC_COUNT = new AtomicInteger();
 
     private static final float SIGNAL_SCALE = 0.66f;
     private static final int MAX_ANCESTOR_DEPTH = 5;
@@ -94,6 +102,8 @@ public final class DualSignalModule extends XposedModule {
                 if (self instanceof View view && isMobileCandidate(view)) {
                     logCandidateOnce(view);
                     scheduleAncestors(view);
+                } else if (self instanceof ViewGroup group && looksLikeStatusBarRoot(group)) {
+                    logStatusRootOnce(group);
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "attach callback ignored: " + t);
@@ -120,7 +130,7 @@ public final class DualSignalModule extends XposedModule {
     }
 
     private static void scheduleParent(ViewGroup parent, View source) {
-        if (DONE.containsKey(parent) || !PENDING.add(parent)) return;
+        if (!PENDING.add(parent)) return;
 
         Handler handler = source.getHandler();
         Runnable action = () -> {
@@ -138,53 +148,34 @@ public final class DualSignalModule extends XposedModule {
     }
 
     private static void tryStack(ViewGroup parent) {
-        if (DONE.containsKey(parent)) return;
-
-        List<View> mobiles = collectDirectMobileChildren(parent);
-        String mode = "direct";
-        if (mobiles.size() != 2) {
-            mobiles = collectWrappedMobileChildren(parent);
-            mode = "wrapped";
-        }
-        if (mobiles.size() != 2) {
+        List<View> mobiles = collectSignalCandidates(parent);
+        List<View> pair = pickDistinctPair(parent, mobiles);
+        if (pair.size() != 2) {
             if (LOGGED_SCANS.put(parent, Boolean.TRUE) == null) {
                 diagnostic(parent.getContext(), "I", "PAIR_NOT_FOUND",
-                        "parent=" + describeDetailed(parent) + " descendants=" + dumpChildren(parent, 0));
+                        "parent=" + describeDetailed(parent) + " candidateCount=" + mobiles.size()
+                                + " descendants=" + dumpChildren(parent, 0));
             }
             return;
         }
-
-        View first = mobiles.get(0);
-        View second = mobiles.get(1);
+        View first = pair.get(0);
+        View second = pair.get(1);
+        if (TRANSFORMED.contains(first) && TRANSFORMED.contains(second)) return;
+        if (CLAIMED.contains(first) || CLAIMED.contains(second)) return;
         if (first == second) { reject(parent, "same view selected"); return; }
-        if (first.getParent() != second.getParent()) {
-            reject(parent, "different parents first=" + describeDetailed(first)
-                    + " second=" + describeDetailed(second));
-            return;
-        }
-        if (!(first.getParent() instanceof ViewGroup actualParent)) {
-            reject(parent, "selected view parent is not ViewGroup");
-            return;
-        }
-
-        int i1 = actualParent.indexOfChild(first);
-        int i2 = actualParent.indexOfChild(second);
-        if (i1 < 0 || i2 < 0 || Math.abs(i1 - i2) > 4) {
-            reject(parent, "unsafe indexes i1=" + i1 + " i2=" + i2);
-            return;
-        }
-
-        final String selectedMode = mode;
-        Log.i(TAG, "pair found mode=" + selectedMode
-                + " parent=" + describe(actualParent)
+        Log.i(TAG, "pair found parent=" + describe(parent)
                 + " first=" + describe(first)
                 + " second=" + describe(second));
-        diagnostic(parent.getContext(), "I", "PAIR_FOUND", "mode=" + selectedMode
-                + " parent=" + describeDetailed(actualParent)
+        diagnostic(parent.getContext(), "I", "PAIR_FOUND", "parent=" + describeDetailed(parent)
                 + " first=" + describeDetailed(first) + " second=" + describeDetailed(second));
-
-        actualParent.post(() -> applyVisualStack(actualParent, first, second));
-        DONE.put(actualParent, Boolean.TRUE);
+        PairState state = new PairState(parent, first, second);
+        CLAIMED.add(first);
+        CLAIMED.add(second);
+        PAIR_STATES.put(first, state);
+        PAIR_STATES.put(second, state);
+        first.addOnLayoutChangeListener(state);
+        second.addOnLayoutChangeListener(state);
+        state.schedule();
     }
 
     private static void applyVisualStack(ViewGroup parent, View first, View second) {
@@ -192,31 +183,25 @@ public final class DualSignalModule extends XposedModule {
             if (!first.isAttachedToWindow() || !second.isAttachedToWindow()) {
                 reject(parent, "pair detached before transform"); return;
             }
-            if (first.getParent() != parent || second.getParent() != parent) {
-                reject(parent, "hierarchy changed before transform"); return;
-            }
-
             int w1 = Math.max(first.getWidth(), first.getMeasuredWidth());
             int w2 = Math.max(second.getWidth(), second.getMeasuredWidth());
             int h1 = Math.max(first.getHeight(), first.getMeasuredHeight());
             int h2 = Math.max(second.getHeight(), second.getMeasuredHeight());
             if (w1 <= 0 || w2 <= 0 || h1 <= 0 || h2 <= 0) {
-                int retry = LAYOUT_RETRIES.getOrDefault(parent, 0) + 1;
-                LAYOUT_RETRIES.put(parent, retry);
                 diagnostic(parent.getContext(), "I", "WAITING_FOR_LAYOUT",
-                        "retry=" + retry + " sizes=" + w1 + "x" + h1 + "," + w2 + "x" + h2);
-                if (retry < 4) parent.post(() -> applyVisualStack(parent, first, second));
+                        "sizes=" + w1 + "x" + h1 + "," + w2 + "x" + h2);
                 return;
             }
-
+            BaseTransform base1 = BASE_TRANSFORMS.computeIfAbsent(first, BaseTransform::new);
+            BaseTransform base2 = BASE_TRANSFORMS.computeIfAbsent(second, BaseTransform::new);
             first.setPivotX(first.getWidth() / 2f);
             first.setPivotY(first.getHeight() / 2f);
             second.setPivotX(second.getWidth() / 2f);
             second.setPivotY(second.getHeight() / 2f);
-            first.setScaleX(SIGNAL_SCALE);
-            first.setScaleY(SIGNAL_SCALE);
-            second.setScaleX(SIGNAL_SCALE);
-            second.setScaleY(SIGNAL_SCALE);
+            first.setScaleX(base1.scaleX * SIGNAL_SCALE);
+            first.setScaleY(base1.scaleY * SIGNAL_SCALE);
+            second.setScaleX(base2.scaleX * SIGNAL_SCALE);
+            second.setScaleY(base2.scaleY * SIGNAL_SCALE);
 
             // Use screen coordinates rather than only getLeft(), because OPlus wrappers
             // can sit inside translated/intermediate containers.
@@ -224,16 +209,19 @@ public final class DualSignalModule extends XposedModule {
             int[] loc2 = new int[2];
             first.getLocationOnScreen(loc1);
             second.getLocationOnScreen(loc2);
-            float center1 = loc1[0] + first.getWidth() / 2f;
-            float center2 = loc2[0] + second.getWidth() / 2f;
+            float center1 = loc1[0] + first.getWidth() / 2f - (first.getTranslationX() - base1.translationX);
+            float center2 = loc2[0] + second.getWidth() / 2f - (second.getTranslationX() - base2.translationX);
             float targetCenter = Math.min(center1, center2) + Math.min(w1, w2) * 0.30f;
-
-            first.setTranslationX(first.getTranslationX() + targetCenter - center1);
-            second.setTranslationX(second.getTranslationX() + targetCenter - center2);
-
+            float centerY1 = loc1[1] + first.getHeight() / 2f - (first.getTranslationY() - base1.translationY);
+            float centerY2 = loc2[1] + second.getHeight() / 2f - (second.getTranslationY() - base2.translationY);
+            float targetCenterY = (centerY1 + centerY2) / 2f;
             float rowOffset = Math.max(2f, Math.min(h1, h2) * 0.24f);
-            first.setTranslationY(first.getTranslationY() - rowOffset);
-            second.setTranslationY(second.getTranslationY() + rowOffset);
+            first.setTranslationX(base1.translationX + targetCenter - center1);
+            second.setTranslationX(base2.translationX + targetCenter - center2);
+            first.setTranslationY(base1.translationY + targetCenterY - rowOffset - centerY1);
+            second.setTranslationY(base2.translationY + targetCenterY + rowOffset - centerY2);
+            TRANSFORMED.add(first);
+            TRANSFORMED.add(second);
 
             Log.i(TAG, "safe-stacked two mobile views: "
                     + describe(first) + " + " + describe(second));
@@ -248,61 +236,98 @@ public final class DualSignalModule extends XposedModule {
         }
     }
 
-    private static List<View> collectDirectMobileChildren(ViewGroup parent) {
-        ArrayList<View> out = new ArrayList<>(2);
-        for (int i = 0; i < parent.getChildCount(); i++) {
-            View child = parent.getChildAt(i);
-            if (isMobileCandidate(child)) out.add(child);
+    private static List<View> collectSignalCandidates(View root) {
+        ArrayList<View> all = new ArrayList<>();
+        collectSignalCandidates(root, 0, all);
+        all.sort((a, b) -> Integer.compare(candidateScore(b), candidateScore(a)));
+        ArrayList<View> pruned = new ArrayList<>();
+        for (View candidate : all) {
+            boolean duplicateBranch = false;
+            for (View kept : pruned) {
+                if (isAncestor(candidate, kept) || isAncestor(kept, candidate)) {
+                    duplicateBranch = true;
+                    break;
+                }
+            }
+            if (!duplicateBranch) pruned.add(candidate);
         }
-        return out;
+        return pruned;
     }
 
-    private static List<View> collectWrappedMobileChildren(ViewGroup parent) {
-        ArrayList<View> out = new ArrayList<>(2);
-        for (int i = 0; i < parent.getChildCount(); i++) {
-            View child = parent.getChildAt(i);
-            if (!(child instanceof ViewGroup vg)) continue;
-            // Status icon wrappers are small. Keep this conservative to avoid QS panels.
-            if (vg.getChildCount() > 12) continue;
-            View hit = findOneMobile(vg, 0);
-            if (hit != null) out.add(child);
-        }
-        return out;
-    }
-
-    private static View findOneMobile(View view, int depth) {
-        if (depth > 4) return null;
-        if (isMobileCandidate(view)) return view;
-        if (view instanceof ViewGroup vg) {
-            for (int i = 0; i < vg.getChildCount(); i++) {
-                View found = findOneMobile(vg.getChildAt(i), depth + 1);
-                if (found != null) return found;
+    private static void collectSignalCandidates(View view, int depth, List<View> out) {
+        if (depth > 5 || out.size() >= 32) return;
+        if (view.getVisibility() == View.VISIBLE && candidateScore(view) > 0) out.add(view);
+        if (view instanceof ViewGroup group) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collectSignalCandidates(group.getChildAt(i), depth + 1, out);
             }
         }
-        return null;
+    }
+
+    private static List<View> pickDistinctPair(ViewGroup root, List<View> candidates) {
+        ArrayList<View> pair = new ArrayList<>(2);
+        View firstBranch = null;
+        for (View candidate : candidates) {
+            View branch = branchUnder(root, candidate);
+            if (branch == null) continue;
+            if (pair.isEmpty()) {
+                pair.add(candidate);
+                firstBranch = branch;
+            } else if (branch != firstBranch) {
+                pair.add(candidate);
+                break;
+            }
+        }
+        if (pair.size() == 2) {
+            pair.sort((a, b) -> Integer.compare(screenX(a), screenX(b)));
+        }
+        return pair;
+    }
+
+    private static View branchUnder(ViewGroup root, View view) {
+        View current = view;
+        ViewParent parent = current.getParent();
+        while (parent instanceof View next && parent != root) {
+            current = next;
+            parent = next.getParent();
+        }
+        return parent == root ? current : null;
+    }
+
+    private static boolean isAncestor(View possibleAncestor, View view) {
+        ViewParent parent = view.getParent();
+        while (parent instanceof View) {
+            if (parent == possibleAncestor) return true;
+            parent = parent.getParent();
+        }
+        return false;
+    }
+
+    private static int screenX(View view) {
+        int[] location = new int[2];
+        view.getLocationOnScreen(location);
+        return location[0];
     }
 
     private static boolean isMobileCandidate(View view) {
+        return candidateScore(view) > 0;
+    }
+
+    private static int candidateScore(View view) {
         String cls = view.getClass().getName().toLowerCase(Locale.ROOT);
         String id = resourceEntryName(view).toLowerCase(Locale.ROOT);
-
-        boolean classHit = cls.contains("statusbarmobile")
-                || cls.contains("mobilesignal")
-                || cls.contains("mobileicon")
-                || cls.contains("cellularsignal")
-                || (cls.contains("mobile") && (cls.contains("statusbar") || cls.contains("signal")))
-                || (cls.contains("oplus") && cls.contains("mobile"));
-
-        boolean idHit = id.contains("mobile_signal")
-                || id.contains("mobile_group")
-                || id.contains("status_bar_mobile")
-                || id.contains("mobile_combo")
-                || id.contains("signal_cluster_mobile")
-                || id.equals("mobile")
-                || id.contains("mobile_icon")
-                || id.contains("mobile_type");
-
-        return classHit || idHit;
+        if ((id.contains("mobile_type") || id.contains("network_type") || id.contains("data_type"))
+                && !id.contains("signal")) return 0;
+        int score = 0;
+        if (id.contains("mobile_signal") || id.contains("cellular_signal")
+                || id.contains("signal_icon") || id.contains("signal_strength")) score += 120;
+        if (cls.contains("mobilesignal") || cls.contains("cellularsignal")
+                || (cls.contains("signal") && cls.contains("mobile"))) score += 100;
+        if (cls.contains("statusbarmobileview")) score += 75;
+        if (id.contains("mobile_icon") || id.contains("status_bar_mobile")) score += 60;
+        if (view instanceof ViewGroup) score -= 20;
+        if (id.contains("group") || id.contains("container") || id.contains("combo")) score -= 30;
+        return Math.max(score, 0);
     }
 
     private static void logCandidateOnce(View v) {
@@ -367,7 +392,22 @@ public final class DualSignalModule extends XposedModule {
         }
     }
 
+    private static boolean looksLikeStatusBarRoot(View view) {
+        String cls = view.getClass().getName().toLowerCase(Locale.ROOT);
+        String id = resourceEntryName(view).toLowerCase(Locale.ROOT);
+        return cls.contains("statusbar") || id.contains("status_bar") || id.contains("system_icons");
+    }
+
+    private static void logStatusRootOnce(ViewGroup root) {
+        try {
+            String key = root.getClass().getName() + "#" + resourceEntryName(root);
+            if (LOGGED_STATUS_ROOTS.size() >= 12 || !LOGGED_STATUS_ROOTS.add(key)) return;
+            diagnostic(root.getContext(), "I", "STATUS_BAR_STRUCTURE", dumpChildren(root, 0));
+        } catch (Throwable ignored) {}
+    }
+
     private static void diagnostic(Context context, String level, String event, String detail) {
+        if (!"E".equals(level) && DIAGNOSTIC_COUNT.incrementAndGet() > 200) return;
         Diagnostics.record(context, level, event, detail);
     }
 
@@ -383,5 +423,42 @@ public final class DualSignalModule extends XposedModule {
         StackTraceElement[] stack = t.getStackTrace();
         for (int i = 0; i < Math.min(stack.length, 8); i++) out.append(" <- ").append(stack[i]);
         return out.toString();
+    }
+
+    private static final class BaseTransform {
+        final float translationX;
+        final float translationY;
+        final float scaleX;
+        final float scaleY;
+        BaseTransform(View view) {
+            translationX = view.getTranslationX();
+            translationY = view.getTranslationY();
+            scaleX = view.getScaleX();
+            scaleY = view.getScaleY();
+        }
+    }
+
+    private static final class PairState implements View.OnLayoutChangeListener {
+        private final ViewGroup root;
+        private final View first;
+        private final View second;
+        private boolean scheduled;
+        PairState(ViewGroup root, View first, View second) {
+            this.root = root;
+            this.first = first;
+            this.second = second;
+        }
+        void schedule() {
+            if (scheduled) return;
+            scheduled = true;
+            root.postOnAnimation(() -> {
+                scheduled = false;
+                applyVisualStack(root, first, second);
+            });
+        }
+        @Override public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                             int oldLeft, int oldTop, int oldRight, int oldBottom) {
+            if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom) schedule();
+        }
     }
 }

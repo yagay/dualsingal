@@ -2,9 +2,9 @@ package com.yagay.dualsignal;
 
 import android.content.Context;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
 final class DiagnosticStore {
     private static final Object LOCK = new Object();
@@ -30,11 +30,13 @@ final class DiagnosticStore {
     static String read(Context context) {
         synchronized (LOCK) {
             File target = file(context);
-            if (!target.exists()) return "尚无诊断日志。启用模块并重启 SystemUI 后再刷新。";
-            try (FileInputStream in = new FileInputStream(target)) {
-                byte[] bytes = new byte[(int) Math.min(target.length(), MAX_BYTES)];
-                int count = in.read(bytes);
-                return count <= 0 ? "日志文件为空。" : new String(bytes, 0, count, StandardCharsets.UTF_8);
+            File old = new File(context.getFilesDir(), FILE_NAME + ".old");
+            if (!target.exists() && !old.exists()) return "尚无诊断日志。启用模块并重启 SystemUI 后再刷新。";
+            try {
+                StringBuilder out = new StringBuilder();
+                if (old.exists()) out.append(Files.readString(old.toPath(), StandardCharsets.UTF_8));
+                if (target.exists()) out.append(Files.readString(target.toPath(), StandardCharsets.UTF_8));
+                return out.length() == 0 ? "日志文件为空。" : out.toString();
             } catch (Throwable t) { return "读取日志失败：" + t; }
         }
     }

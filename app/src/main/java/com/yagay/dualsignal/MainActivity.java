@@ -48,6 +48,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         Diagnostics.record(this, "I", "APP_OPENED", "version=" + installedVersion());
         refresh();
+        logView.postDelayed(this::refresh, 250);
     }
     private Button button(String text, android.view.View.OnClickListener listener) {
         Button button = new Button(this);
