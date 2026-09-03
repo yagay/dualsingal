@@ -31,11 +31,23 @@ jobs:
       - name: Build debug APK
         run: gradle --stacktrace assembleDebug
 
+      - name: Verify LSPosed module metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          unzip -l "$apk" | grep -F "META-INF/xposed/module.prop"
+          unzip -l "$apk" | grep -F "META-INF/xposed/java_init.list"
+          unzip -l "$apk" | grep -F "META-INF/xposed/scope.list"
+          unzip -p "$apk" META-INF/xposed/scope.list | grep -Fx "com.android.systemui"
+          mkdir -p dist
+          cp "$apk" "dist/DualSignal-v1.1.0-debug.apk"
+
       - name: Upload debug APK
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: DualSignal-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: DualSignal-v1.1.0-debug
+          path: dist/DualSignal-v1.1.0-debug.apk
           if-no-files-found: warn
           retention-days: 14

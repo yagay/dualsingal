@@ -28,10 +28,11 @@
 ## 使用
 
 1. 编译并安装 APK。
-2. LSPosed 中启用“ 双排信号 ”。
-3. 作用域为系统界面 `com.android.systemui`（模块声明 static scope）。
-4. 重启 SystemUI 或手机。
-5. 查看 LSPosed 日志标签 `DualSignal102`。
+2. 安装后先打开 APK，确认显示 `1.1.0 (2)` 和包名 `com.yagay.dualsignal`。
+3. 确认 LSPosed 的模块列表中出现“双排信号”，再启用它。
+4. 作用域固定为系统界面 `com.android.systemui`（模块声明 static scope）。
+5. 重启 SystemUI 或手机。
+6. 查看 LSPosed 日志标签 `DualSignal102`。
 
 ## 调试日志
 
@@ -41,3 +42,5 @@
 - `stacked two mobile views: ... + ...`
 
 如果只有第一条没有第二条，说明当前 ROM 的移动信号 View 类名/资源名与候选不一致。此时导出 SystemUI/LSPosed 日志即可继续精确适配，无需再猜资源 ID。
+
+如果上述日志一条都没有，并且 LSPosed 导出中的 `db_modules.txt` / `db_scope.txt` 也没有 `com.yagay.dualsignal`，则模块没有被 LSPosed 注册或没有安装成功；这不是 View Hook 未命中。请安装 Actions 产物中的 `DualSignal-v1.1.0-debug.apk`（不是 artifact 外层 zip），确认版本后再启用并重启。
