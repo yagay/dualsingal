@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">双排信号</string>
+    <string name="app_description">OxygenOS / ColorOS 双 SIM 状态栏双排信号，LSPosed API 102</string>
+</resources>
