@@ -6,6 +6,7 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -24,12 +25,8 @@ import io.github.libxposed.api.XposedModuleInterface;
 /**
  * Crash-safe runtime dual-SIM stacker for OPlus SystemUI.
  *
- * Important safety rule: never re-parent, remove, add, clone, or replace a SystemUI
- * mobile signal View. OPlus SystemUI controllers may retain references to the original
- * parent/index/layout params. Re-parenting those Views can cause a SystemUI crash loop
- * and trigger LSPosed safe mode.
- *
- * This implementation only applies visual transforms to the two existing mobile Views.
+ * Safety rule: never re-parent/remove/add/clone SystemUI mobile views. We only
+ * apply visual transforms to the original views or their existing wrappers.
  */
 public final class DualSignalModule extends XposedModule {
     private static final String TAG = "DualSignal102";
@@ -40,8 +37,11 @@ public final class DualSignalModule extends XposedModule {
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Set<ViewGroup> PENDING =
             Collections.newSetFromMap(Collections.synchronizedMap(new WeakHashMap<>()));
+    private static final Set<String> LOGGED_CANDIDATES =
+            Collections.synchronizedSet(new java.util.HashSet<>());
 
     private static final float SIGNAL_SCALE = 0.66f;
+    private static final int MAX_ANCESTOR_DEPTH = 5;
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
@@ -67,7 +67,7 @@ public final class DualSignalModule extends XposedModule {
             Method attached = View.class.getDeclaredMethod("onAttachedToWindow");
             attached.setAccessible(true);
             hook(attached).intercept(AttachHook.INSTANCE);
-            log(Log.INFO, TAG, "safe attach hook installed");
+            log(Log.INFO, TAG, "safe attach hook installed (ancestor scan enabled)");
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "install failed: " + t);
         }
@@ -82,7 +82,8 @@ public final class DualSignalModule extends XposedModule {
             try {
                 Object self = chain.getThisObject();
                 if (self instanceof View view && isMobileCandidate(view)) {
-                    scheduleParent(view);
+                    logCandidateOnce(view);
+                    scheduleAncestors(view);
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "attach callback ignored: " + t);
@@ -91,11 +92,26 @@ public final class DualSignalModule extends XposedModule {
         }
     }
 
-    private static void scheduleParent(View view) {
-        if (!(view.getParent() instanceof ViewGroup parent)) return;
+    /**
+     * OPlus commonly nests each SIM inside its own wrapper. The previous version
+     * only checked the immediate parent, so it never reached the common parent
+     * containing SIM1-wrapper and SIM2-wrapper. Walk several ancestors and test
+     * each one without changing the hierarchy.
+     */
+    private static void scheduleAncestors(View view) {
+        ViewParent p = view.getParent();
+        int depth = 0;
+        while (p instanceof ViewGroup vg && depth < MAX_ANCESTOR_DEPTH) {
+            scheduleParent(vg, view);
+            p = vg.getParent();
+            depth++;
+        }
+    }
+
+    private static void scheduleParent(ViewGroup parent, View source) {
         if (DONE.containsKey(parent) || !PENDING.add(parent)) return;
 
-        Handler handler = view.getHandler();
+        Handler handler = source.getHandler();
         Runnable action = () -> {
             PENDING.remove(parent);
             try {
@@ -113,8 +129,10 @@ public final class DualSignalModule extends XposedModule {
         if (DONE.containsKey(parent)) return;
 
         List<View> mobiles = collectDirectMobileChildren(parent);
+        String mode = "direct";
         if (mobiles.size() != 2) {
             mobiles = collectWrappedMobileChildren(parent);
+            mode = "wrapped";
         }
         if (mobiles.size() != 2) return;
 
@@ -126,9 +144,14 @@ public final class DualSignalModule extends XposedModule {
 
         int i1 = actualParent.indexOfChild(first);
         int i2 = actualParent.indexOfChild(second);
-        if (i1 < 0 || i2 < 0 || Math.abs(i1 - i2) > 3) return;
+        if (i1 < 0 || i2 < 0 || Math.abs(i1 - i2) > 4) return;
 
-        // Wait until SystemUI has completed at least one layout pass.
+        final String selectedMode = mode;
+        Log.i(TAG, "pair found mode=" + selectedMode
+                + " parent=" + describe(actualParent)
+                + " first=" + describe(first)
+                + " second=" + describe(second));
+
         actualParent.post(() -> applyVisualStack(actualParent, first, second));
         DONE.put(actualParent, Boolean.TRUE);
     }
@@ -147,7 +170,6 @@ public final class DualSignalModule extends XposedModule {
                 return;
             }
 
-            // Keep each SystemUI View in its original parent and original slot.
             first.setPivotX(first.getWidth() / 2f);
             first.setPivotY(first.getHeight() / 2f);
             second.setPivotX(second.getWidth() / 2f);
@@ -157,21 +179,25 @@ public final class DualSignalModule extends XposedModule {
             second.setScaleX(SIGNAL_SCALE);
             second.setScaleY(SIGNAL_SCALE);
 
-            // Move the visual centers onto the same X coordinate without touching layout params.
-            float center1 = first.getLeft() + first.getWidth() / 2f;
-            float center2 = second.getLeft() + second.getWidth() / 2f;
+            // Use screen coordinates rather than only getLeft(), because OPlus wrappers
+            // can sit inside translated/intermediate containers.
+            int[] loc1 = new int[2];
+            int[] loc2 = new int[2];
+            first.getLocationOnScreen(loc1);
+            second.getLocationOnScreen(loc2);
+            float center1 = loc1[0] + first.getWidth() / 2f;
+            float center2 = loc2[0] + second.getWidth() / 2f;
             float targetCenter = Math.min(center1, center2) + Math.min(w1, w2) * 0.30f;
-            first.setTranslationX(targetCenter - center1);
-            second.setTranslationX(targetCenter - center2);
 
-            // Split the normal status-bar height into upper/lower visual rows.
-            float rowOffset = Math.max(2f, Math.min(h1, h2) * 0.23f);
-            first.setTranslationY(-rowOffset);
-            second.setTranslationY(rowOffset);
+            first.setTranslationX(first.getTranslationX() + targetCenter - center1);
+            second.setTranslationX(second.getTranslationX() + targetCenter - center2);
 
-            // Transforms do not modify touch handling, parent ownership, layout params,
-            // controller references, or SystemUI signal state callbacks.
-            Log.i(TAG, "safe-stacked two mobile views: " + describe(first) + " + " + describe(second));
+            float rowOffset = Math.max(2f, Math.min(h1, h2) * 0.24f);
+            first.setTranslationY(first.getTranslationY() - rowOffset);
+            second.setTranslationY(second.getTranslationY() + rowOffset);
+
+            Log.i(TAG, "safe-stacked two mobile views: "
+                    + describe(first) + " + " + describe(second));
         } catch (Throwable t) {
             Log.w(TAG, "visual stack ignored: " + t);
         }
@@ -191,7 +217,8 @@ public final class DualSignalModule extends XposedModule {
         for (int i = 0; i < parent.getChildCount(); i++) {
             View child = parent.getChildAt(i);
             if (!(child instanceof ViewGroup vg)) continue;
-            if (vg.getChildCount() > 8) continue;
+            // Status icon wrappers are small. Keep this conservative to avoid QS panels.
+            if (vg.getChildCount() > 12) continue;
             View hit = findOneMobile(vg, 0);
             if (hit != null) out.add(child);
         }
@@ -199,7 +226,7 @@ public final class DualSignalModule extends XposedModule {
     }
 
     private static View findOneMobile(View view, int depth) {
-        if (depth > 2) return null;
+        if (depth > 4) return null;
         if (isMobileCandidate(view)) return view;
         if (view instanceof ViewGroup vg) {
             for (int i = 0; i < vg.getChildCount(); i++) {
@@ -216,15 +243,39 @@ public final class DualSignalModule extends XposedModule {
 
         boolean classHit = cls.contains("statusbarmobile")
                 || cls.contains("mobilesignal")
-                || (cls.contains("mobile") && cls.contains("statusbar"));
+                || cls.contains("mobileicon")
+                || cls.contains("cellularsignal")
+                || (cls.contains("mobile") && (cls.contains("statusbar") || cls.contains("signal")))
+                || (cls.contains("oplus") && cls.contains("mobile"));
 
         boolean idHit = id.contains("mobile_signal")
                 || id.contains("mobile_group")
                 || id.contains("status_bar_mobile")
                 || id.contains("mobile_combo")
-                || id.contains("signal_cluster_mobile");
+                || id.contains("signal_cluster_mobile")
+                || id.equals("mobile")
+                || id.contains("mobile_icon")
+                || id.contains("mobile_type");
 
         return classHit || idHit;
+    }
+
+    private static void logCandidateOnce(View v) {
+        try {
+            String key = v.getClass().getName() + "#" + resourceEntryName(v);
+            if (!LOGGED_CANDIDATES.add(key)) return;
+            StringBuilder parents = new StringBuilder();
+            ViewParent p = v.getParent();
+            int depth = 0;
+            while (p instanceof View pv && depth < MAX_ANCESTOR_DEPTH) {
+                if (parents.length() > 0) parents.append(" <- ");
+                parents.append(describe(pv));
+                p = pv.getParent();
+                depth++;
+            }
+            Log.i(TAG, "candidate=" + describe(v) + " parents=" + parents);
+        } catch (Throwable ignored) {
+        }
     }
 
     private static String resourceEntryName(View v) {
