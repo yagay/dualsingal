@@ -1,5 +1,6 @@
 package com.yagay.dualsignal;
 
+import android.content.Context;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -39,6 +40,10 @@ public final class DualSignalModule extends XposedModule {
             Collections.newSetFromMap(Collections.synchronizedMap(new WeakHashMap<>()));
     private static final Set<String> LOGGED_CANDIDATES =
             Collections.synchronizedSet(new java.util.HashSet<>());
+    private static final Map<ViewGroup, Boolean> LOGGED_SCANS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<ViewGroup, Integer> LAYOUT_RETRIES =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final float SIGNAL_SCALE = 0.66f;
     private static final int MAX_ANCESTOR_DEPTH = 5;
@@ -46,6 +51,7 @@ public final class DualSignalModule extends XposedModule {
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
         log(Log.INFO, TAG, "loaded in " + param.getProcessName());
+        diagnostic(currentApplication(), "I", "MODULE_LOADED", "process=" + param.getProcessName());
     }
 
     @Override
@@ -68,8 +74,12 @@ public final class DualSignalModule extends XposedModule {
             attached.setAccessible(true);
             hook(attached).intercept(AttachHook.INSTANCE);
             log(Log.INFO, TAG, "safe attach hook installed (ancestor scan enabled)");
+            diagnostic(currentApplication(), "I", "HOOK_INSTALLED",
+                    "View.onAttachedToWindow ancestorDepth=" + MAX_ANCESTOR_DEPTH
+                            + " scale=" + SIGNAL_SCALE);
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "install failed: " + t);
+            diagnostic(currentApplication(), "E", "HOOK_INSTALL_FAILED", stackSummary(t));
         }
     }
 
@@ -87,6 +97,7 @@ public final class DualSignalModule extends XposedModule {
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "attach callback ignored: " + t);
+                diagnostic(currentApplication(), "E", "ATTACH_CALLBACK_FAILED", stackSummary(t));
             }
             return result;
         }
@@ -118,6 +129,7 @@ public final class DualSignalModule extends XposedModule {
                 tryStack(parent);
             } catch (Throwable t) {
                 Log.w(TAG, "stack attempt ignored: " + t);
+                diagnostic(source.getContext(), "E", "STACK_ATTEMPT_FAILED", stackSummary(t));
             }
         };
 
@@ -134,23 +146,42 @@ public final class DualSignalModule extends XposedModule {
             mobiles = collectWrappedMobileChildren(parent);
             mode = "wrapped";
         }
-        if (mobiles.size() != 2) return;
+        if (mobiles.size() != 2) {
+            if (LOGGED_SCANS.put(parent, Boolean.TRUE) == null) {
+                diagnostic(parent.getContext(), "I", "PAIR_NOT_FOUND",
+                        "parent=" + describeDetailed(parent) + " descendants=" + dumpChildren(parent, 0));
+            }
+            return;
+        }
 
         View first = mobiles.get(0);
         View second = mobiles.get(1);
-        if (first == second) return;
-        if (first.getParent() != second.getParent()) return;
-        if (!(first.getParent() instanceof ViewGroup actualParent)) return;
+        if (first == second) { reject(parent, "same view selected"); return; }
+        if (first.getParent() != second.getParent()) {
+            reject(parent, "different parents first=" + describeDetailed(first)
+                    + " second=" + describeDetailed(second));
+            return;
+        }
+        if (!(first.getParent() instanceof ViewGroup actualParent)) {
+            reject(parent, "selected view parent is not ViewGroup");
+            return;
+        }
 
         int i1 = actualParent.indexOfChild(first);
         int i2 = actualParent.indexOfChild(second);
-        if (i1 < 0 || i2 < 0 || Math.abs(i1 - i2) > 4) return;
+        if (i1 < 0 || i2 < 0 || Math.abs(i1 - i2) > 4) {
+            reject(parent, "unsafe indexes i1=" + i1 + " i2=" + i2);
+            return;
+        }
 
         final String selectedMode = mode;
         Log.i(TAG, "pair found mode=" + selectedMode
                 + " parent=" + describe(actualParent)
                 + " first=" + describe(first)
                 + " second=" + describe(second));
+        diagnostic(parent.getContext(), "I", "PAIR_FOUND", "mode=" + selectedMode
+                + " parent=" + describeDetailed(actualParent)
+                + " first=" + describeDetailed(first) + " second=" + describeDetailed(second));
 
         actualParent.post(() -> applyVisualStack(actualParent, first, second));
         DONE.put(actualParent, Boolean.TRUE);
@@ -158,15 +189,23 @@ public final class DualSignalModule extends XposedModule {
 
     private static void applyVisualStack(ViewGroup parent, View first, View second) {
         try {
-            if (!first.isAttachedToWindow() || !second.isAttachedToWindow()) return;
-            if (first.getParent() != parent || second.getParent() != parent) return;
+            if (!first.isAttachedToWindow() || !second.isAttachedToWindow()) {
+                reject(parent, "pair detached before transform"); return;
+            }
+            if (first.getParent() != parent || second.getParent() != parent) {
+                reject(parent, "hierarchy changed before transform"); return;
+            }
 
             int w1 = Math.max(first.getWidth(), first.getMeasuredWidth());
             int w2 = Math.max(second.getWidth(), second.getMeasuredWidth());
             int h1 = Math.max(first.getHeight(), first.getMeasuredHeight());
             int h2 = Math.max(second.getHeight(), second.getMeasuredHeight());
             if (w1 <= 0 || w2 <= 0 || h1 <= 0 || h2 <= 0) {
-                parent.post(() -> applyVisualStack(parent, first, second));
+                int retry = LAYOUT_RETRIES.getOrDefault(parent, 0) + 1;
+                LAYOUT_RETRIES.put(parent, retry);
+                diagnostic(parent.getContext(), "I", "WAITING_FOR_LAYOUT",
+                        "retry=" + retry + " sizes=" + w1 + "x" + h1 + "," + w2 + "x" + h2);
+                if (retry < 4) parent.post(() -> applyVisualStack(parent, first, second));
                 return;
             }
 
@@ -198,8 +237,14 @@ public final class DualSignalModule extends XposedModule {
 
             Log.i(TAG, "safe-stacked two mobile views: "
                     + describe(first) + " + " + describe(second));
+            diagnostic(parent.getContext(), "I", "STACK_APPLIED",
+                    "first=" + describeDetailed(first) + " loc=" + loc1[0] + "," + loc1[1]
+                            + " tx=" + first.getTranslationX() + " ty=" + first.getTranslationY()
+                            + " second=" + describeDetailed(second) + " loc=" + loc2[0] + "," + loc2[1]
+                            + " tx=" + second.getTranslationX() + " ty=" + second.getTranslationY());
         } catch (Throwable t) {
             Log.w(TAG, "visual stack ignored: " + t);
+            diagnostic(parent.getContext(), "E", "STACK_APPLY_FAILED", stackSummary(t));
         }
     }
 
@@ -274,6 +319,7 @@ public final class DualSignalModule extends XposedModule {
                 depth++;
             }
             Log.i(TAG, "candidate=" + describe(v) + " parents=" + parents);
+            diagnostic(v.getContext(), "I", "CANDIDATE", describeDetailed(v) + " parents=" + parents);
         } catch (Throwable ignored) {
         }
     }
@@ -290,5 +336,52 @@ public final class DualSignalModule extends XposedModule {
 
     private static String describe(View v) {
         return v.getClass().getSimpleName() + "#" + resourceEntryName(v);
+    }
+
+    private static String describeDetailed(View v) {
+        return v.getClass().getName() + "#" + resourceEntryName(v)
+                + " vis=" + v.getVisibility() + " attached=" + v.isAttachedToWindow()
+                + " bounds=" + v.getLeft() + "," + v.getTop() + "-" + v.getRight() + "," + v.getBottom();
+    }
+
+    private static String dumpChildren(View view, int depth) {
+        if (depth > 3) return "...";
+        StringBuilder out = new StringBuilder(describeDetailed(view));
+        if (view instanceof ViewGroup group) {
+            out.append('[');
+            int limit = Math.min(group.getChildCount(), 16);
+            for (int i = 0; i < limit; i++) {
+                if (i > 0) out.append("; ");
+                out.append(dumpChildren(group.getChildAt(i), depth + 1));
+            }
+            if (group.getChildCount() > limit) out.append("; +").append(group.getChildCount() - limit);
+            out.append(']');
+        }
+        String value = out.toString();
+        return value.length() > 6000 ? value.substring(0, 6000) + "..." : value;
+    }
+
+    private static void reject(ViewGroup parent, String reason) {
+        if (LOGGED_SCANS.put(parent, Boolean.TRUE) == null) {
+            diagnostic(parent.getContext(), "I", "PAIR_REJECTED", reason);
+        }
+    }
+
+    private static void diagnostic(Context context, String level, String event, String detail) {
+        Diagnostics.record(context, level, event, detail);
+    }
+
+    private static Context currentApplication() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            return (Context) activityThread.getMethod("currentApplication").invoke(null);
+        } catch (Throwable ignored) { return null; }
+    }
+
+    private static String stackSummary(Throwable t) {
+        StringBuilder out = new StringBuilder(t.toString());
+        StackTraceElement[] stack = t.getStackTrace();
+        for (int i = 0; i < Math.min(stack.length, 8); i++) out.append(" <- ").append(stack[i]);
+        return out.toString();
     }
 }

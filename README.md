@@ -28,7 +28,7 @@
 ## 使用
 
 1. 编译并安装 APK。
-2. 安装后先打开 APK，确认显示 `1.1.0 (2)` 和包名 `com.yagay.dualsignal`。
+2. 安装后先打开 APK，确认显示 `1.2.0 (3)` 和包名 `com.yagay.dualsignal`。
 3. 确认 LSPosed 的模块列表中出现“双排信号”，再启用它。
 4. 作用域固定为系统界面 `com.android.systemui`（模块声明 static scope）。
 5. 重启 SystemUI 或手机。
@@ -43,4 +43,4 @@
 
 如果只有第一条没有第二条，说明当前 ROM 的移动信号 View 类名/资源名与候选不一致。此时导出 SystemUI/LSPosed 日志即可继续精确适配，无需再猜资源 ID。
 
-如果上述日志一条都没有，并且 LSPosed 导出中的 `db_modules.txt` / `db_scope.txt` 也没有 `com.yagay.dualsignal`，则模块没有被 LSPosed 注册或没有安装成功；这不是 View Hook 未命中。请安装 Actions 产物中的 `DualSignal-v1.1.0-debug.apk`（不是 artifact 外层 zip），确认版本后再启用并重启。
+从 `1.2.0` 起，模块 App 内置专用诊断页。SystemUI Hook 会把模块加载、Hook 安装、候选 View、父层级、配对失败原因、尺寸/坐标、变换结果和异常写回 App。打开“双排信号”后可以刷新、复制、分享或清空；后续排查只需分享这里的文本，无需导出整包 LSPosed 日志。日志上限约 512 KiB，并对重复扫描结果去重。
