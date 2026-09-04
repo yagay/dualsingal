@@ -10,8 +10,8 @@ android {
         applicationId = "com.yagay.dualsignal"
         minSdk = 31
         targetSdk = 37
-        versionCode = 21
-        versionName = "1.7.1"
+        versionCode = 22
+        versionName = "1.8.0"
     }
 
     buildTypes {

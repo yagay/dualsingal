@@ -1,21 +1,50 @@
-# DualSignal 1.7.0 — iOS27-style dual-row signal (LSPosed)
+# DualSignal 1.8.0 — OxygenOS 16 原生双排信号开关
 
-在 ColorOS / OxygenOS 16 上用 **LSPosed** 实现参考「iOS27 双排信号」的观感：
+本版针对用户提供的 `System UI 16.99.12` APK 实现，不再扫描、移动或替换状态栏 View。
 
-- **一张双排图标**：上排 = SIM1 格数，下排 = SIM2 格数（`DualRowSignalDrawable`）
-- **不再**把两个系统图标缩小后上下叠放
-- 右卡 layout 宽度收为 0，避免信号与电池之间空位
-- 钩子：`View.onAttachedToWindow`、`ImageView.setImageDrawable`、`ImageView.setImageLevel`
+该 SystemUI 已包含完整的 Android 16 原生双排移动信号组件：
 
-## 版本
+- `StackedMobileBindableIcon`
+- `StackedMobileIconBinder`
+- `StackedMobileIconViewModelImpl` / `StackedMobileIconViewModelKairos`
+- `StackedMobileIconKt`
 
-- versionName `1.7.0` / versionCode `20`
+ROM 中这套功能被 `getShouldBindIcon() == false` 和 `isStackable == false` 关闭。本模块只 Hook 这些原生开关并返回启用状态，让 SystemUI 自己完成：
+
+- 双 SIM 顺序与当前数据卡识别
+- 两排真实信号等级
+- 无服务、感叹号和运营商切换状态
+- 网络类型、颜色与深色模式
+- 隐藏原来的独立 SIM 图标
+- 状态栏布局和生命周期管理
+
+## 安全性
+
+- 不 Hook 全局 `View.onAttachedToWindow`
+- 不 Hook 全局 `ImageView.setImageDrawable/setImageLevel`
+- 不调用 `removeView/addView`
+- 不修改 `LayoutParams`
+- 不清空或隐藏系统 Drawable
+- 不伪造默认信号格数
+- 不使用自定义信号 Drawable
+
+## 环境
+
+- versionName `1.8.0` / versionCode `22`
 - libxposed API 102
-- scope: `com.android.systemui`
+- scope：`com.android.systemui`
+- 针对 System UI `16.99.12`
 
 ## 使用
 
-1. 编译安装，确认 App 显示 1.7.0 (20)
-2. LSPosed 启用，作用域 `com.android.systemui`
-3. 强制停止 SystemUI
-4. 日志标签 `DualSignal102`，成功时应有 `mode=dual-row-drawable` 的 `STACK_APPLIED`
+1. 安装 Actions 产物中的 `DualSignal-v1.8.0-debug.apk`。
+2. 在 LSPosed 中启用“双排信号”，作用域为 `com.android.systemui`。
+3. 重启手机或 SystemUI。
+4. 打开模块 App，点击“刷新”查看专用日志。
+
+正常应出现：
+
+- `MODULE_LOADED`
+- `HOOK_INSTALLED mode=native-stacked-mobile`
+- `SYSTEMUI_READY`
+- `NATIVE_STACK_READY`

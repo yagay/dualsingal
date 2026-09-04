@@ -58,7 +58,6 @@ final class Diagnostics {
     }
 
     private static void deliver(Context context, String line) {
-        // Path 1: explicit component broadcast
         try {
             Intent intent = new Intent(DiagnosticReceiver.ACTION)
                     .setPackage(PACKAGE)
@@ -68,17 +67,6 @@ final class Diagnostics {
             context.sendBroadcast(intent);
         } catch (Throwable t) {
             Log.w(TAG, "diagnostic broadcast (explicit) failed: " + t.getMessage());
-        }
-
-        // Path 2: package-scoped broadcast without component
-        try {
-            Intent intent2 = new Intent(DiagnosticReceiver.ACTION)
-                    .setPackage(PACKAGE)
-                    .putExtra(DiagnosticReceiver.EXTRA_LINE, line)
-                    .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-            context.sendBroadcast(intent2);
-        } catch (Throwable t) {
-            Log.w(TAG, "diagnostic broadcast (package) failed: " + t.getMessage());
         }
     }
 }

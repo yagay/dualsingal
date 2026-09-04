@@ -19,16 +19,17 @@ public final class DiagnosticReceiver extends BroadcastReceiver {
     public void onReceive(Context context, Intent intent) {
         if (intent == null || !ACTION.equals(intent.getAction())) return;
 
-        // Android 14+: prefer trusted sender, but do not hard-drop if UID is unknown.
+        // Android 14+: validate the real sender. Android 15+ must provide a valid UID.
         if (Build.VERSION.SDK_INT >= 34) {
             try {
                 int uid = getSentFromUid();
-                if (uid > 0 && !trustedSender(context, uid)) {
+                if ((Build.VERSION.SDK_INT >= 35 && uid <= 0)
+                        || (uid > 0 && !trustedSender(context, uid))) {
                     Log.w(TAG, "diagnostic rejected: untrusted uid=" + uid);
                     return;
                 }
             } catch (Throwable ignored) {
-                // getSentFromUid may throw on some builds — allow through.
+                if (Build.VERSION.SDK_INT >= 35) return;
             }
         }
 

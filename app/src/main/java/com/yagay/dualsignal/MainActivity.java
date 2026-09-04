@@ -33,8 +33,8 @@ public final class MainActivity extends Activity {
         TextView info = new TextView(this);
         info.setText("当前安装：" + installedVersion() + "\n包名：" + getPackageName()
                 + "\n启用模块并重启 SystemUI 后点“刷新”。"
-                + "\nAndroid 16 上 App 内日志可能为空，请以 LSPosed 日志标签 DualSignal102 为准。"
-                + "\n安全策略：仅平移原生信号 View，不改变 SystemUI 层级。");
+                + "\n本版直接启用 SystemUI 16.99.12 自带的原生双排信号管线。"
+                + "\n安全策略：不修改 View、Drawable 或 LayoutParams。");
         info.setPadding(0, p, 0, p);
         root.addView(info);
 

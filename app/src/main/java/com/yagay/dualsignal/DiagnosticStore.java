@@ -45,9 +45,8 @@ final class DiagnosticStore {
                 return "尚无诊断日志。\n\n"
                         + "请确认：\n"
                         + "1. LSPosed 已启用本模块，作用域包含 com.android.systemui\n"
-                        + "2. 已强制停止 SystemUI 或重启手机\n"
-                        + "3. 到 LSPosed 日志里过滤标签 DualSignal102 查看实时输出\n"
-                        + "（Android 16 上广播写回可能失败，以 LSPosed 日志为准）";
+                        + "2. 已重启手机或 SystemUI\n"
+                        + "3. 安装版本为 1.8.0 (22)";
             }
             try {
                 StringBuilder out = new StringBuilder();
