@@ -1,4 +1,4 @@
-# DualSignal 1.8.0 — OxygenOS 16 原生双排信号开关
+# DualSignal 1.8.1 — OxygenOS 16 原生双排信号开关
 
 本版针对用户提供的 `System UI 16.99.12` APK 实现，不再扫描、移动或替换状态栏 View。
 
@@ -30,14 +30,22 @@ ROM 中这套功能被 `getShouldBindIcon() == false` 和 `isStackable == false`
 
 ## 环境
 
-- versionName `1.8.0` / versionCode `22`
+- versionName `1.8.1` / versionCode `23`
 - libxposed API 102
 - scope：`com.android.systemui`
 - 针对 System UI `16.99.12`
 
+## 1.8.1 修复
+
+- 等待 `onPackageReady` 提供 SystemUI 最终 ClassLoader 后再安装 Hook，避免 Hook 到 AppComponentFactory 的临时类副本。
+- 不再用早期 `onPackageLoaded` 的 ClassLoader 设置“已安装”标记。
+- Android 16/OPlus 无法提供广播发送 UID 时不再误丢诊断日志；若能取得 UID，仍验证来源包。
+- 模块 App 自身的 `APP_OPENED` 日志直接写入专用日志文件，不依赖跨进程广播。
+- 增加原生开关实际被调用的日志：`NATIVE_BIND_ENABLED`、`CLASSIC_STACK_ENABLED`、`KAIROS_STACK_ENABLED`。
+
 ## 使用
 
-1. 安装 Actions 产物中的 `DualSignal-v1.8.0-debug.apk`。
+1. 安装 Actions 产物中的 `DualSignal-v1.8.1-debug.apk`。
 2. 在 LSPosed 中启用“双排信号”，作用域为 `com.android.systemui`。
 3. 重启手机或 SystemUI。
 4. 打开模块 App，点击“刷新”查看专用日志。
@@ -48,3 +56,5 @@ ROM 中这套功能被 `getShouldBindIcon() == false` 和 `isStackable == false`
 - `HOOK_INSTALLED mode=native-stacked-mobile`
 - `SYSTEMUI_READY`
 - `NATIVE_STACK_READY`
+- `NATIVE_BIND_ENABLED`
+- `CLASSIC_STACK_ENABLED` 或 `KAIROS_STACK_ENABLED`

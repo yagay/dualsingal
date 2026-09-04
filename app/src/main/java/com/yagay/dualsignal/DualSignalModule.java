@@ -6,6 +6,7 @@ import android.util.Log;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
@@ -30,6 +31,9 @@ public final class DualSignalModule extends XposedModule {
     private static volatile boolean applicationHookInstalled;
     private static volatile Object trueFlow;
     private static volatile Object trueState;
+    private static final AtomicBoolean BIND_CALLED = new AtomicBoolean();
+    private static final AtomicBoolean FLOW_CALLED = new AtomicBoolean();
+    private static final AtomicBoolean STATE_CALLED = new AtomicBoolean();
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
@@ -42,7 +46,7 @@ public final class DualSignalModule extends XposedModule {
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
                 || !TARGET.equals(param.getPackageName()) || !param.isFirstPackage()) return;
-        installNativeStackHooks(param.getDefaultClassLoader());
+        moduleLog(Log.INFO, "PACKAGE_LOADED waiting-for-final-classloader");
     }
 
     @Override
@@ -116,6 +120,10 @@ public final class DualSignalModule extends XposedModule {
     public static final class ForceTrueHook implements XposedInterface.Hooker {
         static final ForceTrueHook INSTANCE = new ForceTrueHook();
         @Override public Object intercept(XposedInterface.Chain chain) {
+            if (BIND_CALLED.compareAndSet(false, true)) {
+                Diagnostics.record(currentApplication(), "I", "NATIVE_BIND_ENABLED",
+                        "StackedMobileBindableIcon.getShouldBindIcon -> true");
+            }
             return Boolean.TRUE;
         }
     }
@@ -123,6 +131,10 @@ public final class DualSignalModule extends XposedModule {
     public static final class ForceTrueFlowHook implements XposedInterface.Hooker {
         static final ForceTrueFlowHook INSTANCE = new ForceTrueFlowHook();
         @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            if (FLOW_CALLED.compareAndSet(false, true)) {
+                Diagnostics.record(currentApplication(), "I", "CLASSIC_STACK_ENABLED",
+                        "MobileIconsInteractorImpl.isStackable -> true flow");
+            }
             Object cached = trueFlow;
             if (cached != null) return cached;
             ClassLoader loader = chain.getThisObject().getClass().getClassLoader();
@@ -137,6 +149,10 @@ public final class DualSignalModule extends XposedModule {
     public static final class ForceTrueStateHook implements XposedInterface.Hooker {
         static final ForceTrueStateHook INSTANCE = new ForceTrueStateHook();
         @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            if (STATE_CALLED.compareAndSet(false, true)) {
+                Diagnostics.record(currentApplication(), "I", "KAIROS_STACK_ENABLED",
+                        "MobileIconsInteractorKairosImpl.isStackable -> true state");
+            }
             Object cached = trueState;
             if (cached != null) return cached;
             ClassLoader loader = chain.getThisObject().getClass().getClassLoader();
@@ -191,5 +207,14 @@ public final class DualSignalModule extends XposedModule {
         StackTraceElement[] stack = t.getStackTrace();
         for (int i = 0; i < Math.min(stack.length, 8); i++) out.append(" <- ").append(stack[i]);
         return out.toString();
+    }
+
+    private static Context currentApplication() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            return (Context) activityThread.getMethod("currentApplication").invoke(null);
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 }

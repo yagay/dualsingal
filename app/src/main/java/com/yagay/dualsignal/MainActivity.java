@@ -54,7 +54,9 @@ public final class MainActivity extends Activity {
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
 
-        Diagnostics.record(this, "I", "APP_OPENED", "version=" + installedVersion());
+        DiagnosticStore.append(this, new java.text.SimpleDateFormat(
+                "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(new java.util.Date())
+                + " | I | APP_OPENED | version=" + installedVersion());
         refresh();
         logView.postDelayed(this::refresh, 300);
     }
