@@ -6,6 +6,9 @@ import android.util.Log;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedInterface;
@@ -27,8 +30,10 @@ public final class DualSignalModule extends XposedModule {
             "com.android.systemui.statusbar.pipeline.mobile.domain.interactor.MobileIconsInteractorKairosImpl";
 
     private static volatile DualSignalModule instance;
-    private static volatile boolean installed;
-    private static volatile boolean applicationHookInstalled;
+    private static final Set<ClassLoader> INSTALLED_LOADERS =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final Set<ClassLoader> APPLICATION_HOOK_LOADERS =
+            Collections.newSetFromMap(new IdentityHashMap<>());
     private static volatile Object trueFlow;
     private static volatile Object trueState;
     private static final AtomicBoolean BIND_CALLED = new AtomicBoolean();
@@ -46,17 +51,25 @@ public final class DualSignalModule extends XposedModule {
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
                 || !TARGET.equals(param.getPackageName()) || !param.isFirstPackage()) return;
-        moduleLog(Log.INFO, "PACKAGE_LOADED waiting-for-final-classloader");
+        ClassLoader loader = param.getDefaultClassLoader();
+        moduleLog(Log.INFO, "PACKAGE_LOADED loader=" + loader);
+        Diagnostics.record(currentApplication(), "I", "PACKAGE_LOADED", "loader=" + loader);
+        // Some LSPosed/OPlus combinations never deliver PackageReady early enough for
+        // SystemUIApplication.onCreate. Install here as well, but track each loader.
+        installNativeStackHooks(loader, "package-loaded");
     }
 
     @Override
     public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
         if (!TARGET.equals(param.getPackageName()) || !param.isFirstPackage()) return;
-        installNativeStackHooks(param.getClassLoader());
+        ClassLoader loader = param.getClassLoader();
+        moduleLog(Log.INFO, "PACKAGE_READY loader=" + loader);
+        Diagnostics.record(currentApplication(), "I", "PACKAGE_READY", "loader=" + loader);
+        installNativeStackHooks(loader, "package-ready");
     }
 
-    private synchronized void installNativeStackHooks(ClassLoader loader) {
-        if (installed) return;
+    private synchronized void installNativeStackHooks(ClassLoader loader, String phase) {
+        if (loader == null || INSTALLED_LOADERS.contains(loader)) return;
         try {
             installApplicationReadyHook(loader);
             Class<?> bindable = Class.forName(BINDABLE, false, loader);
@@ -81,11 +94,12 @@ public final class DualSignalModule extends XposedModule {
                 throw new NoSuchMethodException("No native isStackable implementation found");
             }
 
-            installed = true;
+            INSTALLED_LOADERS.add(loader);
             moduleLog(Log.INFO, "HOOK_INSTALLED mode=native-stacked-mobile"
-                    + " reactiveHooks=" + reactiveHooks + " constructorHooks=" + constructorHooks);
-            Diagnostics.record(null, "I", "HOOK_INSTALLED",
-                    "mode=native-stacked-mobile reactiveHooks=" + reactiveHooks
+                    + " phase=" + phase + " reactiveHooks=" + reactiveHooks
+                    + " constructorHooks=" + constructorHooks);
+            Diagnostics.record(currentApplication(), "I", "HOOK_INSTALLED",
+                    "mode=native-stacked-mobile phase=" + phase + " reactiveHooks=" + reactiveHooks
                             + " constructorHooks=" + constructorHooks);
         } catch (Throwable t) {
             moduleLog(Log.ERROR, "HOOK_INSTALL_FAILED " + stackSummary(t));
@@ -94,11 +108,11 @@ public final class DualSignalModule extends XposedModule {
     }
 
     private void installApplicationReadyHook(ClassLoader loader) {
-        if (applicationHookInstalled) return;
+        if (APPLICATION_HOOK_LOADERS.contains(loader)) return;
         try {
             Class<?> application = Class.forName("com.android.systemui.SystemUIApplication", false, loader);
             hook(application.getDeclaredMethod("onCreate")).intercept(ApplicationReadyHook.INSTANCE);
-            applicationHookInstalled = true;
+            APPLICATION_HOOK_LOADERS.add(loader);
         } catch (Throwable t) {
             moduleLog(Log.WARN, "APPLICATION_HOOK_MISSING " + t);
         }
