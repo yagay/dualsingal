@@ -15,23 +15,29 @@ import android.widget.Toast;
 
 public final class MainActivity extends Activity {
     private TextView logView;
-    @Override protected void onCreate(Bundle savedInstanceState) {
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         int p = Math.round(16 * getResources().getDisplayMetrics().density);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(p, p, p, p);
+
         TextView title = new TextView(this);
         title.setText("双排信号 · 专用诊断");
         title.setTextSize(24);
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(title);
+
         TextView info = new TextView(this);
         info.setText("当前安装：" + installedVersion() + "\n包名：" + getPackageName()
-                + "\n启用模块并重启 SystemUI 后点“刷新”。下次只需分享这里的日志。"
-                + "\n安全策略：仅缩放/平移，不改变 SystemUI View 层级。");
+                + "\n启用模块并重启 SystemUI 后点“刷新”。"
+                + "\nAndroid 16 上 App 内日志可能为空，请以 LSPosed 日志标签 DualSignal102 为准。"
+                + "\n安全策略：仅平移原生信号 View，不改变 SystemUI 层级。");
         info.setPadding(0, p, 0, p);
         root.addView(info);
+
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.addView(button("刷新", v -> refresh()));
@@ -39,6 +45,7 @@ public final class MainActivity extends Activity {
         actions.addView(button("分享", v -> share()));
         actions.addView(button("清空", v -> clear()));
         root.addView(actions);
+
         logView = new TextView(this);
         logView.setTextSize(12);
         logView.setTextIsSelectable(true);
@@ -46,10 +53,12 @@ public final class MainActivity extends Activity {
         scroll.addView(logView);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
+
         Diagnostics.record(this, "I", "APP_OPENED", "version=" + installedVersion());
         refresh();
-        logView.postDelayed(this::refresh, 250);
+        logView.postDelayed(this::refresh, 300);
     }
+
     private Button button(String text, android.view.View.OnClickListener listener) {
         Button button = new Button(this);
         button.setText(text);
@@ -58,27 +67,36 @@ public final class MainActivity extends Activity {
         button.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
         return button;
     }
-    private void refresh() { logView.setText(DiagnosticStore.read(this)); }
+
+    private void refresh() {
+        logView.setText(DiagnosticStore.read(this));
+    }
+
     private void copy() {
         ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(
                 ClipData.newPlainText("DualSignal diagnostics", DiagnosticStore.read(this)));
         Toast.makeText(this, "日志已复制", Toast.LENGTH_SHORT).show();
     }
+
     private void share() {
         Intent intent = new Intent(Intent.ACTION_SEND).setType("text/plain")
                 .putExtra(Intent.EXTRA_SUBJECT, "DualSignal 专用诊断日志")
                 .putExtra(Intent.EXTRA_TEXT, DiagnosticStore.read(this));
         startActivity(Intent.createChooser(intent, "分享诊断日志"));
     }
+
     private void clear() {
         DiagnosticStore.clear(this);
         refresh();
         Toast.makeText(this, "日志已清空", Toast.LENGTH_SHORT).show();
     }
+
     private String installedVersion() {
         try {
             PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
             return info.versionName + " (" + info.getLongVersionCode() + ")";
-        } catch (Throwable ignored) { return "unknown"; }
+        } catch (Throwable ignored) {
+            return "unknown";
+        }
     }
 }
