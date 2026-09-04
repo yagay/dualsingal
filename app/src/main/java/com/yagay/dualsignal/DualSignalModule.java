@@ -54,9 +54,9 @@ public final class DualSignalModule extends XposedModule {
         ClassLoader loader = param.getDefaultClassLoader();
         moduleLog(Log.INFO, "PACKAGE_LOADED loader=" + loader);
         Diagnostics.record(currentApplication(), "I", "PACKAGE_LOADED", "loader=" + loader);
-        // Some LSPosed/OPlus combinations never deliver PackageReady early enough for
-        // SystemUIApplication.onCreate. Install here as well, but track each loader.
-        installNativeStackHooks(loader, "package-loaded");
+        // Diagnostic-only safe mode. Enabling OPlus' dormant native stacked pipeline
+        // from this early phase causes a SystemUI crash loop on System UI 16.99.12.
+        installApplicationReadyHook(loader);
     }
 
     @Override
@@ -65,7 +65,7 @@ public final class DualSignalModule extends XposedModule {
         ClassLoader loader = param.getClassLoader();
         moduleLog(Log.INFO, "PACKAGE_READY loader=" + loader);
         Diagnostics.record(currentApplication(), "I", "PACKAGE_READY", "loader=" + loader);
-        installNativeStackHooks(loader, "package-ready");
+        installApplicationReadyHook(loader);
     }
 
     private synchronized void installNativeStackHooks(ClassLoader loader, String phase) {

@@ -1,4 +1,4 @@
-# DualSignal 1.8.2 — OxygenOS 16 原生双排信号开关
+# DualSignal 1.8.3 — OxygenOS 16 安全诊断版
 
 本版针对用户提供的 `System UI 16.99.12` APK 实现，不再扫描、移动或替换状态栏 View。
 
@@ -30,22 +30,23 @@ ROM 中这套功能被 `getShouldBindIcon() == false` 和 `isStackable == false`
 
 ## 环境
 
-- versionName `1.8.2` / versionCode `24`
+- versionName `1.8.3` / versionCode `25`
 - libxposed API 102
 - scope：`com.android.systemui`
 - 针对 System UI `16.99.12`
 
-## 1.8.2 修复
+## 1.8.3 安全回退
 
-- 同时在 `onPackageLoaded` 和 `onPackageReady` 安装 Hook，兼容不会及时触发后者的 LSPosed/OPlus 组合。
-- 按 ClassLoader 身份分别去重；早期与最终 ClassLoader 不同时，两套类都能正确 Hook。
+- 1.8.2 已证实强制启用 ROM 中休眠的原生 stacked-mobile 管线会触发 SystemUI 崩溃循环。
+- 本版禁用全部双排功能 Hook，只保留 SystemUI 生命周期诊断，用于安全确认注入阶段。
+- 不会修改任何 SystemUI View、Drawable、数据流或布局。
 - Android 16/OPlus 无法提供广播发送 UID 时不再误丢诊断日志；若能取得 UID，仍验证来源包。
 - 模块 App 自身的 `APP_OPENED` 日志直接写入专用日志文件，不依赖跨进程广播。
 - 增加原生开关实际被调用的日志：`NATIVE_BIND_ENABLED`、`CLASSIC_STACK_ENABLED`、`KAIROS_STACK_ENABLED`。
 
 ## 使用
 
-1. 安装 Actions 产物中的 `DualSignal-v1.8.2-debug.apk`。
+1. 安装 Actions 产物中的 `DualSignal-v1.8.3-safe-debug.apk`。
 2. 在 LSPosed 中启用“双排信号”，作用域为 `com.android.systemui`。
 3. 重启手机或 SystemUI。
 4. 打开模块 App，点击“刷新”查看专用日志。
